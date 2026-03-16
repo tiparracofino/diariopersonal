@@ -956,9 +956,13 @@ let viewingId = null;
 let selectedPhoto = null;
 let selectedTags = new Set();
 
+// Firebase globals
+let db, auth, currentUser, appId;
+let f_setDoc, f_deleteDoc, f_doc;
+
 const MONTHS_ES = ['Enero','Febrero','Marzo','Abril','Mayo','Junio','Julio','Agosto','Septiembre','Octubre','Noviembre','Diciembre'];
 
-function init() {
+async function init() {
   entries = JSON.parse(localStorage.getItem(STORAGE_KEY) || '[]');
   tags = JSON.parse(localStorage.getItem(TAGS_KEY) || '["Personal","Trabajo","Gratitud","Ideas","Viajes"]');
   const today = new Date();
@@ -968,6 +972,96 @@ function init() {
   renderCalendar();
   renderEntries();
   updateStats();
+  
+  // Initialize Firebase for Cloud Sync
+  await initFirebase();
+}
+
+async function initFirebase() {
+  try {
+    if (typeof __firebase_config === 'undefined') {
+      console.warn("Configuración de la nube no encontrada. Modo local activo.");
+      return;
+    }
+
+    const { initializeApp } = await import("https://www.gstatic.com/firebasejs/11.6.1/firebase-app.js");
+    const { getAuth, signInWithCustomToken, signInAnonymously, onAuthStateChanged } = await import("https://www.gstatic.com/firebasejs/11.6.1/firebase-auth.js");
+    const { getFirestore, collection, doc, setDoc, deleteDoc, onSnapshot } = await import("https://www.gstatic.com/firebasejs/11.6.1/firebase-firestore.js");
+
+    f_setDoc = setDoc;
+    f_deleteDoc = deleteDoc;
+    f_doc = doc;
+
+    const firebaseConfig = JSON.parse(__firebase_config);
+    const app = initializeApp(firebaseConfig);
+    auth = getAuth(app);
+    db = getFirestore(app);
+    appId = typeof __app_id !== 'undefined' ? __app_id : 'default-app-id';
+
+    if (typeof __initial_auth_token !== 'undefined' && __initial_auth_token) {
+      await signInWithCustomToken(auth, __initial_auth_token);
+    } else {
+      await signInAnonymously(auth);
+    }
+
+    onAuthStateChanged(auth, (user) => {
+      if (user) {
+        currentUser = user;
+        setupRealtimeListeners(collection, onSnapshot);
+        migrateLocalDataToCloud();
+      } else {
+        currentUser = null;
+      }
+    });
+  } catch (error) {
+    console.error("Error conectando a la nube:", error);
+  }
+}
+
+function setupRealtimeListeners(collection, onSnapshot) {
+  if (!currentUser) return;
+  
+  const entriesRef = collection(db, 'artifacts', appId, 'users', currentUser.uid, 'entries');
+  onSnapshot(entriesRef, (snapshot) => {
+    entries = [];
+    snapshot.forEach(d => entries.push(d.data()));
+    localStorage.setItem(STORAGE_KEY, JSON.stringify(entries));
+    renderCalendar();
+    renderEntries();
+    updateStats();
+    
+    // Show cloud indicator
+    const titleSpan = document.querySelector('.header h1 span');
+    if (titleSpan && !titleSpan.innerHTML.includes('☁️')) {
+        titleSpan.innerHTML = '☁️ Sincronizado';
+    }
+  }, (error) => console.error("Error al escuchar entradas:", error));
+
+  const tagsRef = f_doc(db, 'artifacts', appId, 'users', currentUser.uid, 'settings', 'tagsDoc');
+  onSnapshot(tagsRef, (docSnap) => {
+    if (docSnap.exists() && docSnap.data().tags) {
+      tags = docSnap.data().tags;
+      localStorage.setItem(TAGS_KEY, JSON.stringify(tags));
+      renderTags();
+    }
+  }, (error) => console.error("Error al escuchar etiquetas:", error));
+}
+
+async function migrateLocalDataToCloud() {
+  if (!currentUser) return;
+  const localEntries = JSON.parse(localStorage.getItem(STORAGE_KEY + "_migrated") || '[]');
+  if (localEntries.length === 0) {
+    const toMigrate = JSON.parse(localStorage.getItem(STORAGE_KEY) || '[]');
+    if (toMigrate.length > 0) {
+      showToast("Sincronizando con la nube...");
+      for (const e of toMigrate) {
+        await f_setDoc(f_doc(db, 'artifacts', appId, 'users', currentUser.uid, 'entries', e.id), e);
+      }
+      await f_setDoc(f_doc(db, 'artifacts', appId, 'users', currentUser.uid, 'settings', 'tagsDoc'), { tags });
+      localStorage.setItem(STORAGE_KEY + "_migrated", "true");
+      showToast("¡Sincronización completada!");
+    }
+  }
 }
 
 function formatDate(d) {
@@ -1201,39 +1295,53 @@ function addCustomTag() {
   const val = input.value.trim();
   if (!val || tags.includes(val)) { input.value = ''; return; }
   tags.push(val);
-  localStorage.setItem(TAGS_KEY, JSON.stringify(tags));
+  
+  if (currentUser && f_setDoc) {
+    f_setDoc(f_doc(db, 'artifacts', appId, 'users', currentUser.uid, 'settings', 'tagsDoc'), { tags });
+  } else {
+    localStorage.setItem(TAGS_KEY, JSON.stringify(tags));
+  }
+  
   selectedTags.add(val);
   input.value = '';
   renderTags();
 }
 
 // Save
-function saveEntry() {
+async function saveEntry() {
   const text = document.getElementById('entryText').value.trim();
   if (!text && !selectedPhoto) return;
 
   const now = new Date();
   const time = `${String(now.getHours()).padStart(2,'0')}:${String(now.getMinutes()).padStart(2,'0')}`;
 
+  let entryData;
   if (editingId) {
-    const idx = entries.findIndex(e => e.id === editingId);
-    if (idx >= 0) {
-      entries[idx].text = text;
-      entries[idx].photo = selectedPhoto;
-      entries[idx].tags = Array.from(selectedTags);
+    entryData = entries.find(e => e.id === editingId);
+    if (entryData) {
+      entryData.text = text;
+      entryData.photo = selectedPhoto;
+      entryData.tags = Array.from(selectedTags);
     }
   } else {
-    entries.push({
+    entryData = {
       id: Date.now().toString(36) + Math.random().toString(36).slice(2, 6),
       date: selectedDate,
       time,
       text,
       photo: selectedPhoto,
       tags: Array.from(selectedTags)
-    });
+    };
+    entries.push(entryData); // Optimistic UI
   }
 
-  save();
+  if (currentUser && f_setDoc) {
+    const entryRef = f_doc(db, 'artifacts', appId, 'users', currentUser.uid, 'entries', entryData.id);
+    await f_setDoc(entryRef, entryData);
+  } else {
+    save();
+  }
+
   closeModal();
   renderCalendar();
   renderEntries();
@@ -1249,20 +1357,22 @@ function closeConfirm() {
   document.getElementById('confirmModal').classList.remove('active');
 }
 
-function deleteEntry() {
-  if (editingId) {
-    entries = entries.filter(e => e.id !== editingId);
-    save();
+async function deleteEntry() {
+  let idToDelete = editingId || viewingId;
+  if (idToDelete) {
+    if (currentUser && f_deleteDoc) {
+      const entryRef = f_doc(db, 'artifacts', appId, 'users', currentUser.uid, 'entries', idToDelete);
+      await f_deleteDoc(entryRef);
+    } else {
+      entries = entries.filter(e => e.id !== idToDelete);
+      save();
+    }
+    
+    entries = entries.filter(e => e.id !== idToDelete); // Optimistic UI
     closeConfirm();
-    closeModal();
-    renderCalendar();
-    renderEntries();
-    updateStats();
-  } else if (viewingId) {
-    entries = entries.filter(e => e.id !== viewingId);
-    save();
-    closeConfirm();
-    closeViewModal();
+    if (editingId) closeModal();
+    if (viewingId) closeViewModal();
+    
     renderCalendar();
     renderEntries();
     updateStats();
@@ -1418,9 +1528,23 @@ function handleImport(e) {
           });
         }
 
-        // Save and refresh UI
-        save();
-        localStorage.setItem(TAGS_KEY, JSON.stringify(tags));
+        // Save to Cloud if available, else local
+        if (currentUser && f_setDoc) {
+          showToast("Sincronizando importación con la nube...");
+          Promise.all([
+            ...entries.map(e => f_setDoc(f_doc(db, 'artifacts', appId, 'users', currentUser.uid, 'entries', e.id), e)),
+            f_setDoc(f_doc(db, 'artifacts', appId, 'users', currentUser.uid, 'settings', 'tagsDoc'), { tags })
+          ]).then(() => {
+            showToast("Diario importado y sincronizado ☁️");
+          }).catch(err => {
+            console.error(err);
+            showToast("Error subiendo a la nube");
+          });
+        } else {
+          save();
+          localStorage.setItem(TAGS_KEY, JSON.stringify(tags));
+          showToast("Diario importado correctamente");
+        }
         
         renderCalendar();
         renderEntries();
@@ -1479,5 +1603,3 @@ init();
 
 </body>
 </html>
-
-
