@@ -507,6 +507,7 @@ html, body {
   display: flex;
   flex-wrap: wrap;
   gap: 8px;
+  align-items: center;
 }
 
 .tag-chip {
@@ -518,6 +519,9 @@ html, body {
   transition: all 0.15s;
   border: none;
   font-family: var(--font-body);
+  display: flex;
+  align-items: center;
+  gap: 6px;
 }
 
 .tag-chip.selected {
@@ -533,30 +537,57 @@ html, body {
 
 .custom-tag-input {
   display: flex;
-  gap: 6px;
-  margin-top: 8px;
+  gap: 8px;
+  margin-top: 12px;
+  align-items: center;
 }
 
-.custom-tag-input input {
+/* Color picker styling */
+.tag-color-picker {
+  -webkit-appearance: none;
+  appearance: none;
+  border: none;
+  width: 38px;
+  height: 38px;
+  border-radius: var(--radius-sm);
+  background: var(--bg);
+  box-shadow: 2px 2px 5px var(--shadow-dark), -2px -2px 5px var(--shadow-light);
+  cursor: pointer;
+  padding: 3px;
+  outline: none;
+}
+.tag-color-picker::-webkit-color-swatch-wrapper {
+  padding: 0;
+}
+.tag-color-picker::-webkit-color-swatch {
+  border: none;
+  border-radius: calc(var(--radius-sm) - 3px);
+}
+.tag-color-picker::-moz-color-swatch {
+  border: none;
+  border-radius: calc(var(--radius-sm) - 3px);
+}
+
+.custom-tag-input input[type="text"] {
   flex: 1;
-  padding: 8px 12px;
+  padding: 10px 12px;
   border: none;
   border-radius: var(--radius-sm);
   background: var(--bg);
   box-shadow: inset 2px 2px 5px var(--shadow-dark), inset -2px -2px 5px var(--shadow-light);
   font-family: var(--font-body);
-  font-size: 13px;
+  font-size: 14px;
   color: var(--text);
   outline: none;
   -webkit-user-select: text;
   user-select: text;
 }
 
-.custom-tag-input input::placeholder { color: var(--text-light); }
+.custom-tag-input input[type="text"]::placeholder { color: var(--text-light); }
 
 .custom-tag-input button {
-  padding: 8px 14px;
-  font-size: 13px;
+  padding: 10px 16px;
+  font-size: 16px;
   font-weight: 500;
 }
 
@@ -902,6 +933,7 @@ html, body {
       <div class="modal-label">Etiquetas</div>
       <div class="tags-container" id="tagsContainer"></div>
       <div class="custom-tag-input">
+        <input type="color" id="newTagColor" class="tag-color-picker" value="#8b7355" title="Color de la etiqueta">
         <input type="text" id="newTagInput" placeholder="Nueva etiqueta..." maxlength="20">
         <button class="neu-btn" onclick="addCustomTag()">+</button>
       </div>
@@ -956,15 +988,22 @@ let viewingId = null;
 let selectedPhoto = null;
 let selectedTags = new Set();
 
-// Firebase globals
-let db, auth, currentUser, appId;
-let f_setDoc, f_deleteDoc, f_doc;
-
 const MONTHS_ES = ['Enero','Febrero','Marzo','Abril','Mayo','Junio','Julio','Agosto','Septiembre','Octubre','Noviembre','Diciembre'];
 
-async function init() {
+function init() {
   entries = JSON.parse(localStorage.getItem(STORAGE_KEY) || '[]');
-  tags = JSON.parse(localStorage.getItem(TAGS_KEY) || '["Personal","Trabajo","Gratitud","Ideas","Viajes"]');
+  
+  // Migration logic: convert old string tags to object tags with colors,
+  // but default to an empty array [] so the user starts with 0 tags.
+  let rawTags = JSON.parse(localStorage.getItem(TAGS_KEY) || '[]');
+  
+  if (rawTags.length > 0 && typeof rawTags[0] === 'string') {
+    tags = rawTags.map((t, i) => ({ text: t, color: TAG_COLORS[i % TAG_COLORS.length] }));
+    localStorage.setItem(TAGS_KEY, JSON.stringify(tags));
+  } else {
+    tags = rawTags; // Will be [] if new user, or their custom objects if returning
+  }
+
   const today = new Date();
   currentMonth = today.getMonth();
   currentYear = today.getFullYear();
@@ -972,96 +1011,6 @@ async function init() {
   renderCalendar();
   renderEntries();
   updateStats();
-  
-  // Initialize Firebase for Cloud Sync
-  await initFirebase();
-}
-
-async function initFirebase() {
-  try {
-    if (typeof __firebase_config === 'undefined') {
-      console.warn("Configuración de la nube no encontrada. Modo local activo.");
-      return;
-    }
-
-    const { initializeApp } = await import("https://www.gstatic.com/firebasejs/11.6.1/firebase-app.js");
-    const { getAuth, signInWithCustomToken, signInAnonymously, onAuthStateChanged } = await import("https://www.gstatic.com/firebasejs/11.6.1/firebase-auth.js");
-    const { getFirestore, collection, doc, setDoc, deleteDoc, onSnapshot } = await import("https://www.gstatic.com/firebasejs/11.6.1/firebase-firestore.js");
-
-    f_setDoc = setDoc;
-    f_deleteDoc = deleteDoc;
-    f_doc = doc;
-
-    const firebaseConfig = JSON.parse(__firebase_config);
-    const app = initializeApp(firebaseConfig);
-    auth = getAuth(app);
-    db = getFirestore(app);
-    appId = typeof __app_id !== 'undefined' ? __app_id : 'default-app-id';
-
-    if (typeof __initial_auth_token !== 'undefined' && __initial_auth_token) {
-      await signInWithCustomToken(auth, __initial_auth_token);
-    } else {
-      await signInAnonymously(auth);
-    }
-
-    onAuthStateChanged(auth, (user) => {
-      if (user) {
-        currentUser = user;
-        setupRealtimeListeners(collection, onSnapshot);
-        migrateLocalDataToCloud();
-      } else {
-        currentUser = null;
-      }
-    });
-  } catch (error) {
-    console.error("Error conectando a la nube:", error);
-  }
-}
-
-function setupRealtimeListeners(collection, onSnapshot) {
-  if (!currentUser) return;
-  
-  const entriesRef = collection(db, 'artifacts', appId, 'users', currentUser.uid, 'entries');
-  onSnapshot(entriesRef, (snapshot) => {
-    entries = [];
-    snapshot.forEach(d => entries.push(d.data()));
-    localStorage.setItem(STORAGE_KEY, JSON.stringify(entries));
-    renderCalendar();
-    renderEntries();
-    updateStats();
-    
-    // Show cloud indicator
-    const titleSpan = document.querySelector('.header h1 span');
-    if (titleSpan && !titleSpan.innerHTML.includes('☁️')) {
-        titleSpan.innerHTML = '☁️ Sincronizado';
-    }
-  }, (error) => console.error("Error al escuchar entradas:", error));
-
-  const tagsRef = f_doc(db, 'artifacts', appId, 'users', currentUser.uid, 'settings', 'tagsDoc');
-  onSnapshot(tagsRef, (docSnap) => {
-    if (docSnap.exists() && docSnap.data().tags) {
-      tags = docSnap.data().tags;
-      localStorage.setItem(TAGS_KEY, JSON.stringify(tags));
-      renderTags();
-    }
-  }, (error) => console.error("Error al escuchar etiquetas:", error));
-}
-
-async function migrateLocalDataToCloud() {
-  if (!currentUser) return;
-  const localEntries = JSON.parse(localStorage.getItem(STORAGE_KEY + "_migrated") || '[]');
-  if (localEntries.length === 0) {
-    const toMigrate = JSON.parse(localStorage.getItem(STORAGE_KEY) || '[]');
-    if (toMigrate.length > 0) {
-      showToast("Sincronizando con la nube...");
-      for (const e of toMigrate) {
-        await f_setDoc(f_doc(db, 'artifacts', appId, 'users', currentUser.uid, 'entries', e.id), e);
-      }
-      await f_setDoc(f_doc(db, 'artifacts', appId, 'users', currentUser.uid, 'settings', 'tagsDoc'), { tags });
-      localStorage.setItem(STORAGE_KEY + "_migrated", "true");
-      showToast("¡Sincronización completada!");
-    }
-  }
 }
 
 function formatDate(d) {
@@ -1077,6 +1026,12 @@ function formatDisplayDate(dateStr) {
   const date = new Date(y, m-1, d);
   const days = ['Domingo','Lunes','Martes','Miércoles','Jueves','Viernes','Sábado'];
   return `${days[date.getDay()]}, ${d} ${MONTHS_ES[m-1]}`;
+}
+
+// Helper para encontrar el color de una etiqueta
+function getTagColor(tagName) {
+  const tagObj = tags.find(t => t.text === tagName);
+  return tagObj ? tagObj.color : 'var(--accent-warm)';
 }
 
 // Calendar
@@ -1140,9 +1095,9 @@ function renderEntries() {
   document.getElementById('entriesList').innerHTML = dayEntries.map(e => {
     const time = e.time || '';
     const tagHtml = (e.tags || []).map(t => {
-      const idx = tags.indexOf(t) % TAG_COLORS.length;
-      return `<span class="entry-tag" style="background:${TAG_COLORS[idx >= 0 ? idx : 0]}">${escapeHtml(t)}</span>`;
+      return `<span class="entry-tag" style="background:${getTagColor(t)}">${escapeHtml(t)}</span>`;
     }).join('');
+    
     const photoHtml = e.photo ? `<img class="entry-photo-thumb" src="${e.photo}" alt="foto">` : '';
     return `
       <div class="entry-card neu-raised" onclick="viewEntry('${e.id}')">
@@ -1190,6 +1145,11 @@ function openNewEntry() {
   editingId = null;
   selectedPhoto = null;
   selectedTags = new Set();
+  
+  // Cambia el color del picker a uno aleatorio de la paleta original para inspirar
+  const randomHexColors = ['#c4956a', '#7a8f72', '#8b7355', '#9b8178', '#6b7f8a'];
+  document.getElementById('newTagColor').value = randomHexColors[Math.floor(Math.random() * randomHexColors.length)];
+
   document.getElementById('modalTitle').textContent = 'Nueva entrada';
   document.getElementById('entryText').value = '';
   document.getElementById('photoPreview').style.display = 'none';
@@ -1277,71 +1237,69 @@ function removePhoto() {
 
 // Tags
 function renderTags() {
-  document.getElementById('tagsContainer').innerHTML = tags.map((t, i) => {
-    const sel = selectedTags.has(t);
-    const color = TAG_COLORS[i % TAG_COLORS.length];
-    return `<button class="tag-chip ${sel ? 'selected' : ''}" style="${sel ? 'background:' + color : ''}" onclick="toggleTag('${escapeHtml(t)}')">${escapeHtml(t)}</button>`;
+  document.getElementById('tagsContainer').innerHTML = tags.map(t => {
+    const sel = selectedTags.has(t.text);
+    const color = t.color;
+    // El puntito de color aparece si NO está seleccionada
+    const dotHtml = !sel ? `<span style="display:inline-block;width:10px;height:10px;border-radius:50%;background:${color};"></span>` : '';
+    
+    return `<button class="tag-chip ${sel ? 'selected' : ''}" style="${sel ? 'background:' + color : ''}" onclick="toggleTag('${escapeHtml(t.text)}')">
+              ${dotHtml} ${escapeHtml(t.text)}
+            </button>`;
   }).join('');
 }
 
-function toggleTag(t) {
-  if (selectedTags.has(t)) selectedTags.delete(t);
-  else selectedTags.add(t);
+function toggleTag(tagName) {
+  if (selectedTags.has(tagName)) selectedTags.delete(tagName);
+  else selectedTags.add(tagName);
   renderTags();
 }
 
 function addCustomTag() {
   const input = document.getElementById('newTagInput');
+  const colorInput = document.getElementById('newTagColor');
   const val = input.value.trim();
-  if (!val || tags.includes(val)) { input.value = ''; return; }
-  tags.push(val);
+  const colorVal = colorInput.value;
   
-  if (currentUser && f_setDoc) {
-    f_setDoc(f_doc(db, 'artifacts', appId, 'users', currentUser.uid, 'settings', 'tagsDoc'), { tags });
-  } else {
-    localStorage.setItem(TAGS_KEY, JSON.stringify(tags));
+  if (!val || tags.some(t => t.text.toLowerCase() === val.toLowerCase())) { 
+    input.value = ''; 
+    return; 
   }
   
+  tags.push({ text: val, color: colorVal });
+  localStorage.setItem(TAGS_KEY, JSON.stringify(tags));
   selectedTags.add(val);
   input.value = '';
   renderTags();
 }
 
 // Save
-async function saveEntry() {
+function saveEntry() {
   const text = document.getElementById('entryText').value.trim();
   if (!text && !selectedPhoto) return;
 
   const now = new Date();
   const time = `${String(now.getHours()).padStart(2,'0')}:${String(now.getMinutes()).padStart(2,'0')}`;
 
-  let entryData;
   if (editingId) {
-    entryData = entries.find(e => e.id === editingId);
-    if (entryData) {
-      entryData.text = text;
-      entryData.photo = selectedPhoto;
-      entryData.tags = Array.from(selectedTags);
+    const idx = entries.findIndex(e => e.id === editingId);
+    if (idx >= 0) {
+      entries[idx].text = text;
+      entries[idx].photo = selectedPhoto;
+      entries[idx].tags = Array.from(selectedTags);
     }
   } else {
-    entryData = {
+    entries.push({
       id: Date.now().toString(36) + Math.random().toString(36).slice(2, 6),
       date: selectedDate,
       time,
       text,
       photo: selectedPhoto,
       tags: Array.from(selectedTags)
-    };
-    entries.push(entryData); // Optimistic UI
+    });
   }
 
-  if (currentUser && f_setDoc) {
-    const entryRef = f_doc(db, 'artifacts', appId, 'users', currentUser.uid, 'entries', entryData.id);
-    await f_setDoc(entryRef, entryData);
-  } else {
-    save();
-  }
-
+  save();
   closeModal();
   renderCalendar();
   renderEntries();
@@ -1357,22 +1315,20 @@ function closeConfirm() {
   document.getElementById('confirmModal').classList.remove('active');
 }
 
-async function deleteEntry() {
-  let idToDelete = editingId || viewingId;
-  if (idToDelete) {
-    if (currentUser && f_deleteDoc) {
-      const entryRef = f_doc(db, 'artifacts', appId, 'users', currentUser.uid, 'entries', idToDelete);
-      await f_deleteDoc(entryRef);
-    } else {
-      entries = entries.filter(e => e.id !== idToDelete);
-      save();
-    }
-    
-    entries = entries.filter(e => e.id !== idToDelete); // Optimistic UI
+function deleteEntry() {
+  if (editingId) {
+    entries = entries.filter(e => e.id !== editingId);
+    save();
     closeConfirm();
-    if (editingId) closeModal();
-    if (viewingId) closeViewModal();
-    
+    closeModal();
+    renderCalendar();
+    renderEntries();
+    updateStats();
+  } else if (viewingId) {
+    entries = entries.filter(e => e.id !== viewingId);
+    save();
+    closeConfirm();
+    closeViewModal();
     renderCalendar();
     renderEntries();
     updateStats();
@@ -1391,9 +1347,8 @@ function viewEntry(id) {
   if (entry.photo) html += `<img class="view-photo" src="${entry.photo}" alt="foto guardada">`;
   html += `<div class="view-text">${escapeHtml(entry.text)}</div>`;
   if (entry.tags && entry.tags.length) {
-    html += '<div class="view-tags">' + entry.tags.map((t, i) => {
-      const idx = tags.indexOf(t) % TAG_COLORS.length;
-      return `<span class="entry-tag" style="background:${TAG_COLORS[idx >= 0 ? idx : 0]}">${escapeHtml(t)}</span>`;
+    html += '<div class="view-tags">' + entry.tags.map(t => {
+      return `<span class="entry-tag" style="background:${getTagColor(t)}">${escapeHtml(t)}</span>`;
     }).join('') + '</div>';
   }
 
@@ -1521,30 +1476,30 @@ function handleImport(e) {
           }
         });
 
-        // Merge tags
+        // Merge tags objects based on text
         if (data.tags && Array.isArray(data.tags)) {
-          data.tags.forEach(t => {
-            if (!tags.includes(t)) tags.push(t);
+          data.tags.forEach(incomingTag => {
+            // Compatibilidad si el backup traía tags como strings puros
+            if (typeof incomingTag === 'string') {
+               if(!tags.some(t => t.text === incomingTag)) {
+                  tags.push({ text: incomingTag, color: 'var(--accent-warm)' });
+               }
+            } else {
+               // Tag es un objeto { text, color }
+               const exist = tags.findIndex(t => t.text === incomingTag.text);
+               if (exist === -1) {
+                  tags.push(incomingTag);
+               } else {
+                  // Actualizar color si se importó uno nuevo
+                  tags[exist].color = incomingTag.color;
+               }
+            }
           });
         }
 
-        // Save to Cloud if available, else local
-        if (currentUser && f_setDoc) {
-          showToast("Sincronizando importación con la nube...");
-          Promise.all([
-            ...entries.map(e => f_setDoc(f_doc(db, 'artifacts', appId, 'users', currentUser.uid, 'entries', e.id), e)),
-            f_setDoc(f_doc(db, 'artifacts', appId, 'users', currentUser.uid, 'settings', 'tagsDoc'), { tags })
-          ]).then(() => {
-            showToast("Diario importado y sincronizado ☁️");
-          }).catch(err => {
-            console.error(err);
-            showToast("Error subiendo a la nube");
-          });
-        } else {
-          save();
-          localStorage.setItem(TAGS_KEY, JSON.stringify(tags));
-          showToast("Diario importado correctamente");
-        }
+        // Save and refresh UI
+        save();
+        localStorage.setItem(TAGS_KEY, JSON.stringify(tags));
         
         renderCalendar();
         renderEntries();
@@ -1603,3 +1558,5 @@ init();
 
 </body>
 </html>
+
+
