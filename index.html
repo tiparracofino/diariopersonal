@@ -591,6 +591,53 @@ html, body {
   font-weight: 500;
 }
 
+/* Tags Manager */
+.tags-manager-list {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  max-height: 50vh;
+  overflow-y: auto;
+  margin-bottom: 20px;
+  padding: 4px;
+}
+
+.tag-edit-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px;
+  border-radius: var(--radius-sm);
+  background: var(--bg);
+  box-shadow: inset 2px 2px 5px var(--shadow-dark), inset -2px -2px 5px var(--shadow-light);
+}
+
+.tag-edit-input {
+  flex: 1;
+  border: none;
+  background: transparent;
+  font-family: var(--font-body);
+  font-size: 15px;
+  color: var(--text);
+  outline: none;
+  -webkit-user-select: text;
+  user-select: text;
+}
+
+.icon-btn {
+  width: 38px;
+  height: 38px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0;
+  font-size: 16px;
+}
+
+.delete-icon {
+  color: #b85c4a;
+}
+
 /* Modal actions */
 .modal-actions {
   display: flex;
@@ -777,7 +824,7 @@ html, body {
 }
 
 /* Scrollbar */
-.entries-section::-webkit-scrollbar, .stats-bar::-webkit-scrollbar { display: none; }
+.entries-section::-webkit-scrollbar, .stats-bar::-webkit-scrollbar, .tags-manager-list::-webkit-scrollbar { display: none; }
 
 /* Animations */
 .entry-card {
@@ -889,11 +936,13 @@ html, body {
     
     <div class="modal-field">
       <p style="font-size: 14px; color: var(--text-mid); margin-bottom: 20px; line-height: 1.5; font-weight: 300;">
-        Gestiona tus datos. Puedes exportar un archivo con tu diario actual y guardarlo donde quieras, o importar uno existente. Las importaciones fusionarán los datos sin borrar lo que ya tienes.
+        Gestiona tus datos y etiquetas.
       </p>
     </div>
 
     <div class="modal-actions" style="flex-direction: column; gap: 12px; margin-top: 0;">
+      <button class="neu-btn btn-save btn-full" style="color: var(--text);" onclick="openTagsManager()">🏷️ Gestionar Etiquetas</button>
+      <div style="height: 10px;"></div>
       <button class="neu-btn btn-save btn-full" onclick="exportData()">Exportar Copia de Seguridad</button>
       <button class="neu-btn btn-cancel btn-full" style="background: var(--bg);" onclick="triggerImport()">Importar Copia de Seguridad</button>
       <input type="file" id="importInput" accept=".json" style="display:none;" onchange="handleImport(event)">
@@ -901,6 +950,23 @@ html, body {
     
     <div class="modal-actions" style="margin-top: 24px;">
       <button class="neu-btn btn-cancel" style="width: 100%;" onclick="closeSettings()">Cerrar</button>
+    </div>
+  </div>
+</div>
+
+<!-- Tag Manager Modal -->
+<div class="modal-overlay" id="tagsManagerModal">
+  <div class="modal">
+    <div class="modal-handle"></div>
+    <div class="modal-title">Mis Etiquetas</div>
+    <p style="font-size: 13px; color: var(--text-light); margin-bottom: 16px;">Edita el nombre y color de tus etiquetas, o elimínalas por completo.</p>
+    
+    <div class="tags-manager-list" id="tagsManagerList">
+      <!-- Dynamic tag rows -->
+    </div>
+
+    <div class="modal-actions" style="margin-top: 24px;">
+      <button class="neu-btn btn-cancel" style="width: 100%;" onclick="closeTagsManager()">Volver a Ajustes</button>
     </div>
   </div>
 </div>
@@ -960,13 +1026,24 @@ html, body {
   </div>
 </div>
 
-<!-- Confirm Modal -->
+<!-- Confirm Entry Delete Modal -->
 <div class="confirm-overlay" id="confirmModal">
   <div class="confirm-box neu-raised">
     <p>¿Eliminar esta entrada?<br>Esta acción no se puede deshacer.</p>
     <div class="confirm-btns">
       <button class="neu-btn btn-no" onclick="closeConfirm()">No</button>
       <button class="neu-btn btn-yes" onclick="deleteEntry()">Eliminar</button>
+    </div>
+  </div>
+</div>
+
+<!-- Confirm Tag Delete Modal -->
+<div class="confirm-overlay" id="confirmTagModal">
+  <div class="confirm-box neu-raised">
+    <p>¿Borrar etiqueta?<br><span style="font-size: 13px; color: var(--text-light);">Se eliminará también de todas las entradas donde la hayas usado.</span></p>
+    <div class="confirm-btns">
+      <button class="neu-btn btn-no" onclick="closeConfirmTag()">No</button>
+      <button class="neu-btn btn-yes" onclick="executeDeleteTag()">Borrar</button>
     </div>
   </div>
 </div>
@@ -987,14 +1064,14 @@ let editingId = null;
 let viewingId = null;
 let selectedPhoto = null;
 let selectedTags = new Set();
+let tagToDeleteIdx = null; // Para borrar etiquetas
 
 const MONTHS_ES = ['Enero','Febrero','Marzo','Abril','Mayo','Junio','Julio','Agosto','Septiembre','Octubre','Noviembre','Diciembre'];
 
 function init() {
   entries = JSON.parse(localStorage.getItem(STORAGE_KEY) || '[]');
   
-  // Migration logic: convert old string tags to object tags with colors,
-  // but default to an empty array [] so the user starts with 0 tags.
+  // Migration logic for tags
   let rawTags = JSON.parse(localStorage.getItem(TAGS_KEY) || '[]');
   
   if (rawTags.length > 0 && typeof rawTags[0] === 'string') {
@@ -1146,8 +1223,8 @@ function openNewEntry() {
   selectedPhoto = null;
   selectedTags = new Set();
   
-  // Cambia el color del picker a uno aleatorio de la paleta original para inspirar
-  const randomHexColors = ['#c4956a', '#7a8f72', '#8b7355', '#9b8178', '#6b7f8a'];
+  // Cambia el color del picker a uno aleatorio para inspirar
+  const randomHexColors = ['#c4956a', '#7a8f72', '#8b7355', '#9b8178', '#6b7f8a', '#d18c8c', '#8a9a86', '#768591'];
   document.getElementById('newTagColor').value = randomHexColors[Math.floor(Math.random() * randomHexColors.length)];
 
   document.getElementById('modalTitle').textContent = 'Nueva entrada';
@@ -1235,7 +1312,7 @@ function removePhoto() {
   document.getElementById('photoArea').classList.remove('has-photo');
 }
 
-// Tags
+// Tags Selector in Modal
 function renderTags() {
   document.getElementById('tagsContainer').innerHTML = tags.map(t => {
     const sel = selectedTags.has(t.text);
@@ -1273,7 +1350,115 @@ function addCustomTag() {
   renderTags();
 }
 
-// Save
+// --- Tag Manager Functions ---
+function openTagsManager() {
+  closeSettings();
+  renderTagsManagerList();
+  document.getElementById('tagsManagerModal').classList.add('active');
+}
+
+function closeTagsManager() {
+  document.getElementById('tagsManagerModal').classList.remove('active');
+  renderTags();
+  renderEntries();
+}
+
+function renderTagsManagerList() {
+  const container = document.getElementById('tagsManagerList');
+  if (tags.length === 0) {
+    container.innerHTML = '<p style="text-align:center; color:var(--text-light); font-size:14px; padding: 20px;">Aún no tienes etiquetas.</p>';
+    return;
+  }
+  
+  container.innerHTML = tags.map((t, index) => `
+    <div class="tag-edit-row">
+      <input type="color" class="tag-color-picker" id="editTagColor_${index}" value="${t.color}">
+      <input type="text" class="tag-edit-input" id="editTagText_${index}" value="${escapeHtml(t.text)}">
+      <button class="neu-btn icon-btn" onclick="saveTagEdit(${index})" title="Guardar">✓</button>
+      <button class="neu-btn icon-btn delete-icon" onclick="confirmDeleteTag(${index})" title="Eliminar">✕</button>
+    </div>
+  `).join('');
+}
+
+function saveTagEdit(index) {
+  const oldText = tags[index].text;
+  const newText = document.getElementById(`editTagText_${index}`).value.trim();
+  const newColor = document.getElementById(`editTagColor_${index}`).value;
+
+  if (!newText) {
+    showToast("El nombre no puede estar vacío");
+    return;
+  }
+
+  // Check if renaming to an existing tag name
+  if (oldText.toLowerCase() !== newText.toLowerCase() && tags.some((t, i) => i !== index && t.text.toLowerCase() === newText.toLowerCase())) {
+    showToast("Ya existe una etiqueta con ese nombre");
+    return;
+  }
+
+  // Update the tag definition
+  tags[index].text = newText;
+  tags[index].color = newColor;
+  localStorage.setItem(TAGS_KEY, JSON.stringify(tags));
+
+  // If name changed, update all entries in the past that used this tag
+  if (oldText !== newText) {
+    entries.forEach(entry => {
+      if (entry.tags && entry.tags.includes(oldText)) {
+        entry.tags = entry.tags.map(t => t === oldText ? newText : t);
+      }
+    });
+    save(); // Update entries in localStorage
+    
+    // Update currently selected tags if we are in the middle of writing an entry
+    if (selectedTags.has(oldText)) {
+      selectedTags.delete(oldText);
+      selectedTags.add(newText);
+    }
+  }
+
+  renderTagsManagerList();
+  showToast("Etiqueta actualizada");
+}
+
+function confirmDeleteTag(index) {
+  tagToDeleteIdx = index;
+  document.getElementById('confirmTagModal').classList.add('active');
+}
+
+function closeConfirmTag() {
+  document.getElementById('confirmTagModal').classList.remove('active');
+  tagToDeleteIdx = null;
+}
+
+function executeDeleteTag() {
+  if (tagToDeleteIdx === null) return;
+  const tagText = tags[tagToDeleteIdx].text;
+
+  // 1. Remove from tags array
+  tags.splice(tagToDeleteIdx, 1);
+  localStorage.setItem(TAGS_KEY, JSON.stringify(tags));
+
+  // 2. Remove from all old entries
+  entries.forEach(entry => {
+    if (entry.tags && entry.tags.includes(tagText)) {
+      entry.tags = entry.tags.filter(t => t !== tagText);
+    }
+  });
+  save();
+
+  // 3. Remove from current selection if active
+  if (selectedTags.has(tagText)) {
+    selectedTags.delete(tagText);
+  }
+
+  closeConfirmTag();
+  renderTagsManagerList();
+  showToast("Etiqueta eliminada");
+}
+
+
+// Save Entry
 function saveEntry() {
   const text = document.getElementById('entryText').value.trim();
   if (!text && !selectedPhoto) return;
@@ -1306,7 +1491,7 @@ function saveEntry() {
   updateStats();
 }
 
-// Delete
+// Delete Entry
 function confirmDelete() {
   document.getElementById('confirmModal').classList.add('active');
 }
@@ -1381,7 +1566,7 @@ function toggleSearch() {
   }
 }
 
-// --- Import / Export Logic ---
+// --- Settings & Import / Export Logic ---
 function openSettings() {
   document.getElementById('settingsModal').classList.add('active');
 }
@@ -1539,7 +1724,7 @@ function escapeHtml(s) {
   return div.innerHTML;
 }
 
-// Close modals on overlay tap
+// Close modals on overlay tap (only if clicking the dark overlay)
 document.getElementById('entryModal').addEventListener('click', function(e) {
   if (e.target === this) closeModal();
 });
@@ -1551,6 +1736,12 @@ document.getElementById('confirmModal').addEventListener('click', function(e) {
 });
 document.getElementById('settingsModal').addEventListener('click', function(e) {
   if (e.target === this) closeSettings();
+});
+document.getElementById('tagsManagerModal').addEventListener('click', function(e) {
+  if (e.target === this) closeTagsManager();
+});
+document.getElementById('confirmTagModal').addEventListener('click', function(e) {
+  if (e.target === this) closeConfirmTag();
 });
 
 init();
